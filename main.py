@@ -5,6 +5,7 @@ import time
 import re
 from traffic_classifier import TrafficClassifier
 from speech_handler import SpeechHandler
+from mongodb_handler import MongoDBHandler
 
 
 class TrafficDetectionSystem:
@@ -12,6 +13,13 @@ class TrafficDetectionSystem:
         self.classifier = TrafficClassifier()
         self.speech = SpeechHandler()
         self.model_path = model_path
+        self.mongodb = MongoDBHandler()
+        
+        # Try to connect to MongoDB Atlas
+        print("\n" + "="*50)
+        print("🌐 TRAFFIC DETECTION SYSTEM")
+        print("="*50)
+        self.mongodb.connect()
         
         # Try to load existing model
         if os.path.exists(model_path):
@@ -48,6 +56,17 @@ class TrafficDetectionSystem:
         # Save model
         self.classifier.save_model(self.model_path)
         
+        # Save metrics to MongoDB
+        if self.mongodb.connected:
+            self.mongodb.save_model_metrics(
+                model_name='TrafficClassifier',
+                accuracy=metrics.get('accuracy', 0),
+                f1_score=metrics.get('f1_score', 0),
+                roc_auc=metrics.get('roc_auc', 0),
+                training_samples=len(X),
+                epochs=50
+            )
+        
         # Announce results
         f1 = metrics['f1_score']
         roc = metrics['roc_auc']
@@ -81,6 +100,24 @@ class TrafficDetectionSystem:
             print(f"Probability: {probability:.4f}")
             print(f"{'='*50}\n")
             
+            # Save to MongoDB
+            if self.mongodb.connected:
+                self.mongodb.save_analysis_result(
+                    image_path=image_path,
+                    traffic_level=traffic_level,
+                    confidence=confidence,
+                    probability=probability,
+                    metadata={'source': 'analysis_mode'}
+                )
+                
+                # Also save to traffic data collection
+                self.mongodb.save_traffic_data(
+                    traffic_level=traffic_level,
+                    confidence=confidence,
+                    location=os.path.dirname(image_path),
+                    additional_data={'image': os.path.basename(image_path)}
+                )
+            
             # Announce result via speech
             self.speech.announce_traffic(traffic_level, confidence)
             
@@ -106,6 +143,14 @@ class TrafficDetectionSystem:
             
             print(f"[STATUS] Dataset: {heavy_count} heavy images, {low_count} low images")
             self.speak_with_fix(f"Dataset has {heavy_count} heavy and {low_count} low traffic images.")
+            
+            # Show MongoDB stats if connected
+            if self.mongodb.connected:
+                stats = self.mongodb.get_traffic_statistics()
+                if stats and stats['total_analyses'] > 0:
+                    print(f"\n[DB STATS] Total analyses: {stats['total_analyses']}")
+                    print(f"[DB STATS] Heavy: {stats['heavy_count']}, Low: {stats['low_count']}")
+                    self.speak_with_fix(f"Database shows {stats['total_analyses']} total analyses.")
     
     def extract_image_path_from_voice(self, voice_text):
         """Extract image path from voice command."""
@@ -261,6 +306,14 @@ class TrafficDetectionSystem:
             # Summary
             self.speak_with_fix("Test complete.")
             print("\n✅ Test complete!")
+            
+            # Show database summary
+            if self.mongodb.connected:
+                stats = self.mongodb.get_traffic_statistics()
+                print(f"\n📊 Database Summary:")
+                print(f"   Total analyses: {stats.get('total_analyses', 0)}")
+                print(f"   Heavy traffic: {stats.get('heavy_count', 0)}")
+                print(f"   Low traffic: {stats.get('low_count', 0)}")
         else:
             self.speak_with_fix("No test images found. Please add images to data folder.")
             print("\n❌ No test images found in data/heavy/ or data/low/")
@@ -327,12 +380,55 @@ class TrafficDetectionSystem:
         
         confirm = self.speech.get_voice_command(timeout=5)
         
-        if confirm and ('yes' in confirm.lower() or 'yeah'  in confirm.lower() or 'start' in confirm.lower() or 'go' in confirm.lower() or 'proceed' in confirm.lower()):
+        if confirm and ('yes' in confirm.lower() or 'yeah' in confirm.lower() or 'start' in confirm.lower() or 'go' in confirm.lower() or 'proceed' in confirm.lower()):
             self.speak_with_fix("Starting model training. This may take several minutes.")
             self.train_new_model(data_dir)
         else:
             self.speak_with_fix("Training cancelled.")
             print("Training cancelled.")
+    
+    def show_database_stats(self):
+        """Show database statistics."""
+        if not self.mongodb.connected:
+            self.speak_with_fix("Not connected to database.")
+            return
+        
+        stats = self.mongodb.get_traffic_statistics()
+        
+        print("\n" + "="*50)
+        print("📊 DATABASE STATISTICS")
+        print("="*50)
+        print(f"Total Analyses: {stats.get('total_analyses', 0)}")
+        print(f"Heavy Traffic: {stats.get('heavy_count', 0)} ({stats.get('heavy_percentage', 0):.1f}%)")
+        print(f"Low Traffic: {stats.get('low_count', 0)} ({100 - stats.get('heavy_percentage', 0):.1f}%)")
+        print(f"Average Confidence: {stats.get('avg_confidence', 0):.2%}")
+        print("="*50)
+        
+        self.speak_with_fix(f"Database has {stats.get('total_analyses', 0)} total analyses. "
+                           f"{stats.get('heavy_count', 0)} heavy, "
+                           f"{stats.get('low_count', 0)} low traffic.")
+    
+    def export_database_data(self):
+        """Export database data to CSV."""
+        if not self.mongodb.connected:
+            self.speak_with_fix("Not connected to database.")
+            return
+        
+        self.speak_with_fix("Exporting data to CSV files.")
+        
+        # Export analysis results
+        if self.mongodb.export_to_csv('analysis_results'):
+            print("✅ Exported analysis_results.csv")
+        
+        # Export model metrics
+        if self.mongodb.export_to_csv('model_metrics'):
+            print("✅ Exported model_metrics.csv")
+        
+        # Export traffic data
+        if self.mongodb.export_to_csv('traffic_data'):
+            print("✅ Exported traffic_data.csv")
+        
+        self.speak_with_fix("Export complete. CSV files saved in current directory.")
     
     def run_interactive_mode(self):
         """Run in simplified interactive voice-controlled mode."""
@@ -345,6 +441,8 @@ class TrafficDetectionSystem:
         print("   • 'test' - Test with sample images")
         print("   • 'scan' - Analyze an image")
         print("   • 'train' - Train new model")
+        print("   • 'stats' - Show database statistics")
+        print("   • 'export' - Export data to CSV")
         print("   • 'stop' - Cancel")
         print("   • 'bye' - Exit voice mode")
         print("\n📸 For images, say numbers 1-10")
@@ -381,6 +479,14 @@ class TrafficDetectionSystem:
             elif cmd_lower in ['train', 'new', 'retrain', 'build']:
                 self.handle_train_command()
             
+            # Database statistics
+            elif cmd_lower in ['stats', 'statistics', 'db stats']:
+                self.show_database_stats()
+            
+            # Export data
+            elif cmd_lower in ['export', 'save', 'backup']:
+                self.export_database_data()
+            
             # Scan/Analyze
             elif cmd_lower in ['scan', 'analyze', 'check', 'examine', 'detect']:
                 self.handle_analyze_command(command)
@@ -390,7 +496,7 @@ class TrafficDetectionSystem:
                 self.handle_analyze_command(command)
             
             else:
-                self.speak_with_fix("Say info, test, scan, train, or bye.")
+                self.speak_with_fix("Say info, test, scan, train, stats, or bye.")
                 print(f"[UNKNOWN]: '{cmd_lower}'")
 
 
@@ -422,6 +528,9 @@ def main():
             system.run_interactive_mode()
         
         elif choice == '4':
+            # Close MongoDB connection before exit
+            if hasattr(system, 'mongodb') and system.mongodb.connected:
+                system.mongodb.close()
             print("Goodbye!")
             break
         
